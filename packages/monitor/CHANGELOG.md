@@ -1,0 +1,42 @@
+# Changelog
+
+## 0.18.7
+
+- No longer requires the latest `@colyseus/core`: any 0.18 version works.
+
+## 0.18.6
+
+- Inspecting a room with a large state no longer re-downloads it every few seconds: the state is fetched only while the State tab is open, and strings over 1 KB are shown as a size placeholder (read-only). [#979](https://github.com/colyseus/colyseus/issues/979)
+
+## 0.18.5
+
+- `@colyseus/core` moved to `peerDependencies`, matching the other panels. A project whose own `@colyseus/core` range no longer overlaps the monitor's now fails at install, instead of quietly getting a second copy of the matchmaker that reports no rooms.
+
+## 0.18.4
+
+- The "Memory" card now shows the resident memory of the Colyseus process serving the panel instead of system-wide usage — hover it to see which process that is. The API keeps `totalMemMb`/`usedMemMb` and adds `memory.rssMb` and `memory.processId`. Thanks @fatihcvs! [#969](https://github.com/colyseus/colyseus/pull/969)
+
+- Stat cards and room actions no longer push the panel wider than the viewport on phones. Thanks @fatihcvs! [#970](https://github.com/colyseus/colyseus/pull/970)
+
+## 0.18.3
+
+- The panel now works at any express mount path — `app.use("/stats", monitor())` no longer requires a matching `prefix` option.
+
+- The bare-path redirect (`/monitor` → `/monitor/`) is now a 302, so browsers no longer cache it permanently.
+
+## 0.18.2
+
+- Fix the CommonJS build crashing on import, which also took down `require("colyseus")`.
+
+- Node.js 22 is now the declared minimum (`engines`).
+
+## 0.17.8
+
+- Allow editing and deleting room state values from the monitor panel
+- Replace `react-json-edit` and `react18-json-view` with `json-edit-react`
+- Redesigned UI: stat cards, cleaner layout, better spacing
+
+## 0.17.7
+
+- Initial changelog entry
+

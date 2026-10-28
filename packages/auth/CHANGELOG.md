@@ -1,0 +1,26 @@
+# Changelog
+
+## 0.18.4
+
+- A browser holding an auth token from another app on the same origin can now join rooms in a project that doesn't use auth: the token is ignored when no JWT secret is configured.
+
+## 0.18.3
+
+- `require()` of this package now resolves to the same ESM build `import` gets, so a process that uses both no longer loads two copies. [#979](https://github.com/colyseus/colyseus/issues/979)
+
+## 0.18.2
+
+- Internal: bundled asset paths resolve through `import.meta.dirname`.
+
+## 0.17.9
+
+- Fix null handling for `onFindUserByEmail` return value in `/login` and `/register` routes. Previously, a `null` return was silently converted to `{}` via `Object.assign`, masking the missing user. (https://github.com/colyseus/colyseus/pull/922, thanks @JoaoCnh)
+
+## 0.17.8
+
+- Fix dynamic 'origin' detection during OAuth. Before this change you were required to manually set `auth.oauth.defaults.origin` per environment for some OAuth providers (e.g. `twitch`). Now the `origin` can be auto-detected.
+
+## 0.17.7
+
+- Fix Express origin/backend_url detector utility for OAuth.
+

@@ -1,0 +1,41 @@
+*.log
+node_modules
+yarn.lock
+/lib
+.DS_Store
+build/
+.devmode.json
+.claude/
+
+# LICENSE is identical for every package; `build.ts --publish-files` copies
+# the root one in at publish time. READMEs are NOT ignored: a package's own
+# README has to be tracked, or CI never sees it and npm shows the root one.
+**/LICENSE
+
+.nyc_output
+coverage
+esm
+dump.rdb
+
+# Per-package runtime/build artifacts
+**/dist
+*.db
+*.db-shm
+*.db-wal
+
+# drizzle-kit generated migrations land here when developers run db:generate
+# locally; consumers commit their own migration folders into their own repos.
+packages/database/drizzle/
+
+# Local scratch notes, WIP design briefs, porting drafts, benchmarks —
+# personal working files, not part of the tracked source.
+/benchmark/
+/TODO/
+/PORTING/
+/NENGI.md
+/SESSION.md
+/RELEASE.txt
+/SCHEMA.md
+/TODO_0.18.md
+/test.sh
+pnpm-publish-summary.json

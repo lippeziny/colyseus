@@ -1,0 +1,340 @@
+import WebSocket from "ws";
+import { EventEmitter } from "events";
+
+import { pack, unpack } from "msgpackr";
+import { Decoder, type Schema, type StateView } from "@colyseus/schema";
+
+import {
+  type Client,
+  type ServerOptions,
+  type ISendOptions,
+  type ClientPrivate,
+  ClientState,
+  Server,
+  Room,
+  matchMaker,
+  LocalDriver,
+  LocalPresence,
+  Deferred,
+  CloseCode,
+  SchemaSerializer,
+} from "@colyseus/core";
+
+import { RedisPresence } from "@colyseus/redis-presence";
+import { RedisDriver } from "@colyseus/redis-driver";
+
+// import { MongooseDriver } from "@colyseus/mongoose-driver";
+
+import { WebSocketTransport } from '@colyseus/ws-transport';
+import { PostgresDriver } from "@colyseus/drizzle-driver";
+
+Server.prototype['getDefaultTransport'] = async function (options: ServerOptions) {
+  return new WebSocketTransport({
+    pingInterval: 150,
+    pingMaxRetries: 1,
+  });
+}
+
+export const DRIVERS = [
+  LocalDriver,
+  // RedisDriver,
+  // PostgresDriver,
+  // MongooseDriver,
+];
+
+export const PRESENCE_IMPLEMENTATIONS = [
+  LocalPresence,
+  // RedisPresence
+];
+
+export class RawClient extends EventEmitter {
+  readyState: number = WebSocket.OPEN;
+}
+
+export class WebSocketClient implements Client, ClientPrivate {
+  '~messages': any;
+
+  id!: string;
+  sessionId!: string;
+  ref: RawClient;
+  state: ClientState = ClientState.JOINING;
+
+  messages: any[] = [];
+  _enqueuedMessages?: any[] = [];
+  _afterNextPatchQueue;
+  _joinedAt!: number;
+  reconnectionToken;
+
+  errors: any[] = [];
+
+  constructor (id?: string) {
+    if (id) {
+      this.id = id;
+      this.sessionId = id;
+    }
+    this.ref = new RawClient();
+    this.ref.once('close', () => this.ref.readyState = WebSocket.CLOSED);
+  }
+
+  sendBytes(type: string | number, bytes: number[] | Uint8Array, options?: ISendOptions): void {
+    this.messages.push(bytes);
+  }
+
+  // @ts-ignore
+  send (message: any) {
+    this.messages.push(message);
+  }
+
+  receive (message) {
+    this.ref.emit('message', pack(message));
+  }
+
+  getMessageAt(index: number) {
+    return unpack(this.messages[index]);
+  }
+
+  raw(message, options) {
+    this.messages.push(message);
+  }
+
+  enqueueRaw(message, options) {
+    if (this.state === ClientState.JOINING) {
+      this._enqueuedMessages?.push(message);
+      return;
+    }
+    this.messages.push(message);
+  }
+
+  async confirmJoinRoom(room: Room, reconnectionToken?: string) {
+    await room['_onJoin'](this, { headers: new Headers(), ip: "127.0.0.1" }, {
+      reconnectionToken,
+      skipHandshake: reconnectionToken !== undefined
+    });
+
+    //
+    // this simulates when the client-side has sent the `Protocol.JOIN_ROOM` message
+    // (see `Room._onMessage`)
+    //
+    this.state = ClientState.JOINED;
+    this._enqueuedMessages = undefined;
+  }
+
+  error(code, message) {
+    this.errors.push([code, message]);
+  }
+
+  get lastMessage () {
+    return this.getMessageAt(this.messages.length - 1);
+  }
+
+  get readyState () {
+    return this.ref.readyState;
+  }
+
+  leave(code?: number) {
+    this.ref.readyState = WebSocket.CLOSED;
+    this.ref.emit('close');
+  }
+
+  close (code?: number) {
+    this.leave(code);
+  }
+
+  terminate(code: number = 1000) {
+    this.ref.emit('close', code);
+  }
+
+}
+
+export function createEmptyClient() {
+  return new WebSocketClient();
+}
+
+export function createDummyClient (seatReservation: matchMaker.ISeatReservation, options: any = {}) {
+  let client = new WebSocketClient(seatReservation.sessionId);
+  (client as any).options = options;
+  return client;
+}
+
+export function timeout(ms: number = 200) {
+  return new Promise<void>((resolve, reject) => setTimeout(resolve, ms));
+}
+
+/**
+ * Waits for `condition` to hold instead of sleeping a duration guessed from
+ * how long the code under test ought to take. Returns as soon as it's true,
+ * and gives up after `timeoutMs` so the assertion that follows reports what
+ * actually went wrong rather than a bare timeout.
+ */
+export async function waitUntil(condition: () => boolean, timeoutMs: number = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) {
+    await timeout(10);
+  }
+}
+
+/**
+ * A client that records what the serializer hands each channel. `raw` keeps
+ * frames by reference, as a stalled socket does. `rawUnreliable` copies, as a
+ * datagram transport must, and exists only when `unreliableCapable` (its
+ * absence is the capability check).
+ */
+export function fakeClient(unreliableCapable: boolean, view?: StateView) {
+  const reliable: Uint8Array[] = [];
+  const unreliable: Uint8Array[] = [];
+
+  const client: any = {
+    state: ClientState.JOINED,
+    view,
+    reliable,
+    unreliable,
+    raw: (data: Uint8Array) => reliable.push(data),
+  };
+
+  if (unreliableCapable) {
+    client.rawUnreliable = (data: Uint8Array) => unreliable.push(data.slice());
+  }
+
+  return client as Client & { reliable: Uint8Array[]; unreliable: Uint8Array[] };
+}
+
+export function serializerFor<T extends Schema>(state: T) {
+  const serializer = new SchemaSerializer<T>();
+  serializer.reset(state);
+  return serializer;
+}
+
+/** The state a client ends up with once it decodes `frames`, in order. */
+export function decodeFrames(klass: any, frames: Uint8Array[], headerSize = 1) {
+  const decoded = new klass();
+  const decoder = new Decoder(decoded);
+  for (const frame of frames) { decoder.decode(frame.subarray(headerSize)); }
+  return decoded.toJSON();
+}
+
+export class DummyRoom extends Room {
+  onCreate(options: any) {
+    if (options.roomId) { this.roomId = options.roomId; }
+    this.onMessage("*", (_, type, message) => {
+      this.broadcast(type, message);
+    });
+  }
+  onDispose() { }
+  onJoin() { }
+  onLeave() { }
+}
+
+export class Room2Clients extends Room {
+  maxClients = 2;
+
+  onCreate(options: { mode: string, roomId?: string }) {
+    if (options.roomId) { this.roomId = options.roomId; }
+    this.onMessage("*", (_, type, message) => {
+      this.broadcast(type, message);
+    });
+  }
+  onDispose() { }
+  onJoin() { }
+  onLeave() { }
+}
+
+export class Room2ClientsExplicitLock extends Room {
+  maxClients = 2;
+
+  onCreate(options: any) {
+    if (options.roomId) { this.roomId = options.roomId; }
+    this.onMessage("lock", () => this.lock());
+  }
+  onDispose() { }
+  onJoin() { }
+  onLeave() { }
+}
+
+export class Room3Clients extends Room {
+  maxClients = 3;
+
+  onCreate(options: any) {
+    if (options.roomId) { this.roomId = options.roomId; }
+    this.onMessage("*", (_, type, message) => {
+      this.broadcast(type, message);
+    });
+  }
+
+  onDispose() { }
+  onJoin() { }
+  onLeave() { }
+}
+
+export class ReconnectRoom extends Room {
+  maxClients = 4;
+
+  onCreate(options: any) {
+    if (options.roomId) { this.roomId = options.roomId; }
+    this.onMessage("*", (_, type, message) => {
+      this.broadcast(type, message);
+    });
+  }
+  onDispose() { }
+  onJoin() { }
+
+  async onLeave(client, code: CloseCode) {
+    try {
+      if (code === CloseCode.CONSENTED) throw new Error("consented");
+      await this.allowReconnection(client, 0.2); // 200ms
+
+    } catch (e) {
+      // Reconnection failed or timed out
+    }
+  }
+}
+
+export class ReconnectTokenRoom extends Room {
+  maxClients = 4;
+  token!: Deferred;
+
+  onCreate(options: any) {
+    if (options.roomId) { this.roomId = options.roomId; }
+    this.setState({})
+  }
+  onDispose() { }
+
+  onJoin(client) {
+    this.state[client.sessionId] = "CONNECTED";
+  }
+
+  async onLeave(client, code: CloseCode) {
+    if (code !== CloseCode.CONSENTED) {
+      const reconnection = this.allowReconnection(client, 10);
+      this.token = reconnection;
+
+      try {
+        await reconnection;
+
+      } catch (e) {
+      }
+
+    }
+  }
+
+  onMessage(client, message) {}
+}
+
+export class RoomWithAsync extends DummyRoom {
+  static ASYNC_TIMEOUT = 200;
+  maxClients = 1;
+
+  async onAuth() {
+    await timeout(RoomWithAsync.ASYNC_TIMEOUT);
+    return true;
+  }
+
+  onJoin () {}
+
+  async onLeave() {
+    await timeout(RoomWithAsync.ASYNC_TIMEOUT);
+  }
+
+  async onDispose() {
+    await timeout(RoomWithAsync.ASYNC_TIMEOUT);
+  }
+}

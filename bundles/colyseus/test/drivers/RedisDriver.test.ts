@@ -1,0 +1,171 @@
+import assert from "assert";
+import { Redis } from "ioredis";
+import { RedisDriver } from "@colyseus/redis-driver";
+import { initializeRoomCache } from "@colyseus/core";
+
+describe("RedisDriver", () => {
+  let driver: RedisDriver;
+
+  before(async () => {
+    driver = new RedisDriver();
+    // await driver.boot(); // Register Lua scripts
+  });
+
+  after(async () => {
+    await driver.shutdown();
+  });
+
+  describe("constructor with pre-created client", () => {
+    it("should accept an existing Redis client", async () => {
+      const client = new Redis();
+      const injectedDriver = new RedisDriver(client);
+
+      await injectedDriver.persist(initializeRoomCache({ name: "injected", roomId: "inj1", clients: 1, maxClients: 10 }));
+      const room = await injectedDriver.findOne({ roomId: "inj1" });
+      assert.strictEqual(room.name, "injected");
+
+      await injectedDriver.clear();
+      await injectedDriver.shutdown();
+    });
+
+    it("should use the same Redis connection when client is injected", async () => {
+      const client = new Redis();
+      const injectedDriver = new RedisDriver(client);
+
+      // Write via the injected driver, read via the raw client to confirm same connection
+      await injectedDriver.persist(initializeRoomCache({ name: "shared", roomId: "shared1", clients: 0, maxClients: 10 }));
+      const raw = await client.hget("roomcaches", "shared1");
+      assert.ok(raw);
+      assert.strictEqual(JSON.parse(raw).name, "shared");
+
+      await injectedDriver.clear();
+      await injectedDriver.shutdown();
+    });
+  });
+
+  it("should allow concurrent queries to multiple room names", async () => {
+    // Clear any existing data
+    await driver.clear();
+
+    for (let i=0; i<10; i++) { await driver.persist(initializeRoomCache({ name: "one", roomId: "x" + i, clients: i, maxClients: 10, })); }
+    for (let i=0; i<10; i++) { await driver.persist(initializeRoomCache({ name: "two", roomId: "y" + i, clients: i, maxClients: 10, })); }
+    for (let i=0; i<10; i++) { await driver.persist(initializeRoomCache({ name: "three", roomId: "z" + i, clients: i, maxClients: 10, })); }
+
+    // Test concurrent findOne queries
+    const [res1, res2, res3, res4] = await Promise.all([
+      driver.findOne({ name: "one" }),
+      driver.findOne({ name: "two" }),
+      driver.findOne({ name: "three" }),
+      driver.findOne({ name: "three", clients: 3 }),
+    ]);
+
+    assert.strictEqual(res1.name, "one");
+    assert.strictEqual(res2.name, "two");
+    assert.strictEqual(res3.name, "three");
+    assert.strictEqual(res4.clients, 3);
+  });
+
+  it("should filter and sort rooms using query()", async () => {
+    // Clear any existing data
+    await driver.clear();
+
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "a1", clients: 5, maxClients: 10 }));
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "a2", clients: 3, maxClients: 10 }));
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "a3", clients: 8, maxClients: 10 }));
+    await driver.persist(initializeRoomCache({ name: "lobby", roomId: "b1", clients: 2, maxClients: 10 }));
+
+    // Test filtering
+    const gameRooms = await driver.query({ name: "game" });
+    assert.strictEqual(gameRooms.length, 3);
+    assert.ok(gameRooms.every(r => r.name === "game"));
+
+    // Test sorting ascending
+    const sortedAsc = await driver.query({ name: "game" }, { clients: 1 });
+    assert.strictEqual(sortedAsc[0].clients, 3);
+    assert.strictEqual(sortedAsc[1].clients, 5);
+    assert.strictEqual(sortedAsc[2].clients, 8);
+
+    // Test sorting descending
+    const sortedDesc = await driver.query({ name: "game" }, { clients: -1 });
+    assert.strictEqual(sortedDesc[0].clients, 8);
+    assert.strictEqual(sortedDesc[1].clients, 5);
+    assert.strictEqual(sortedDesc[2].clients, 3);
+  });
+
+  it("should filter by metadata fields", async () => {
+    // Clear any existing data
+    await driver.clear();
+
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "m1", clients: 1, maxClients: 10, metadata: { mode: "pvp", level: 5 } }));
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "m2", clients: 2, maxClients: 10, metadata: { mode: "pve", level: 3 } }));
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "m3", clients: 3, maxClients: 10, metadata: { mode: "pvp", level: 10 } }));
+
+    // Filter by metadata field
+    const pvpRooms = await driver.query({ name: "game", mode: "pvp" } as any);
+    assert.strictEqual(pvpRooms.length, 2);
+    assert.ok(pvpRooms.every(r => (r.metadata as any).mode === "pvp"));
+
+    // FindOne with metadata filter
+    const pveRoom = await driver.findOne({ name: "game", mode: "pve" } as any);
+    assert.strictEqual((pveRoom.metadata as any).mode, "pve");
+  });
+
+  // rooms may copy client options into metadata
+  it("should filter by metadata that has a \"hasOwnProperty\" key", async () => {
+    await driver.clear();
+
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "h1", clients: 1, maxClients: 10, metadata: { mode: "pvp", hasOwnProperty: 1 } }));
+
+    const pvpRooms = await driver.query({ name: "game", mode: "pvp" } as any);
+    assert.strictEqual(pvpRooms.length, 1);
+  });
+
+  it("query() by name should only return rooms of that name", async () => {
+    await driver.clear();
+
+    await driver.persist(initializeRoomCache({ name: "one", roomId: "n1", clients: 1, maxClients: 10 }));
+    await driver.persist(initializeRoomCache({ name: "one_more", roomId: "n2", clients: 1, maxClients: 10 }));
+
+    // its JSON contains `"name":"one"`, but it is not a room named "one"
+    await driver.persist(initializeRoomCache({ name: "two", roomId: "n3", clients: 1, maxClients: 10, metadata: { name: "one" } }));
+
+    assert.deepStrictEqual(["n1"], (await driver.query({ name: "one" })).map((r) => r.roomId));
+    assert.strictEqual(3, (await driver.query({})).length);
+  });
+
+  it("query() should recover after a failed Redis read", async () => {
+    await driver.clear();
+    await driver.persist(initializeRoomCache({ name: "game", roomId: "f1", clients: 0, maxClients: 10 }));
+
+    // simulate Redis being down: ioredis rejects once its retries run out
+    const client = (driver as any)._client as Redis;
+    client.hgetall = (() => Promise.reject(new Error("Reached the max retries per request limit"))) as any;
+
+    try {
+      // both names share the same in-flight read
+      const results = await Promise.allSettled([driver.query({ name: "game" }), driver.query({ name: "lobby" })]);
+      assert.deepStrictEqual(["rejected", "rejected"], results.map((r) => r.status));
+    } finally {
+      delete (client as any).hgetall;
+    }
+
+    assert.deepStrictEqual(["f1"], (await driver.query({ name: "game" })).map((r) => r.roomId));
+    assert.strictEqual(1, (await driver.query({})).length);
+  });
+
+  it("findByIds() should handle more ids than fit in one command", async () => {
+    await driver.clear();
+
+    const roomIds: string[] = [];
+    for (let i = 0; i < 1200; i++) {
+      roomIds.push(`r${i}`);
+      await driver.persist(initializeRoomCache({ name: "many", roomId: `r${i}`, clients: 0, maxClients: 10 }));
+    }
+
+    const found = await driver.findByIds([...roomIds, "missing"]);
+    assert.strictEqual(1200, found.size);
+    assert.strictEqual("r1199", found.get("r1199")!.roomId);
+    assert.strictEqual(false, found.has("missing"));
+  });
+
+});
